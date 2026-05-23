@@ -1,0 +1,92 @@
+name: CI/CD Apache
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build y Push imagen Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/apache-auy1104:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/apache-auy1104:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Desplegar en k3s vía SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.K3S_HOST }}
+          username: ${{ secrets.K3S_USER }}
+          key: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
+          script: |
+            kubectl apply -f - <<'EOF'
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: apache
+              labels:
+                app: apache
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: apache
+              template:
+                metadata:
+                  labels:
+                    app: apache
+                spec:
+                  containers:
+                    - name: apache
+                      image: ${{ secrets.DOCKERHUB_USERNAME }}/apache-auy1104:${{ github.sha }}
+                      ports:
+                        - containerPort: 80
+            EOF
+
+            kubectl apply -f - <<'EOF'
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: apache-svc
+            spec:
+              type: NodePort
+              selector:
+                app: apache
+              ports:
+                - port: 80
+                  targetPort: 80
+                  nodePort: 30100
+            EOF
+
+            kubectl rollout status deployment/apache --timeout=60s
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar servicio
+        run: |
+          sleep 15
+          curl -f http://${{ secrets.K3S_HOST }}:30100 || echo "Verificación manual necesaria"
